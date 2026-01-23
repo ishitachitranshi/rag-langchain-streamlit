@@ -1,10 +1,10 @@
 import os
 import tempfile
 from pathlib import Path
+from typing import List, Tuple
 
 import streamlit as st
 
-from langchain.chains import ConversationalRetrievalChain
 from langchain_openai import ChatOpenAI
 from langchain_community.vectorstores import Chroma
 from langchain_community.document_loaders import PyPDFLoader
@@ -43,6 +43,10 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("📌 Upload PDFs and ask questions using RAG")
 
+    st.markdown("---")
+    show_sources = st.toggle("Show retrieved chunks", value=False)
+    top_k = st.slider("Top-K chunks", min_value=2, max_value=10, value=5, step=1)
+
 # -------------------- HELPERS --------------------
 def load_pdf(file_path: str):
     loader = PyPDFLoader(file_path)
@@ -54,10 +58,10 @@ def split_documents(documents):
 
 @st.cache_resource(show_spinner=False)
 def get_local_embeddings():
-    # Local, free embeddings (no HuggingFace API key required)
+    # Free local embeddings (no HuggingFace API key)
     return SentenceTransformerEmbeddings(model_name="all-MiniLM-L6-v2")
 
-def create_retriever(texts):
+def create_retriever(texts, k: int):
     embeddings = get_local_embeddings()
 
     vectordb = Chroma.from_documents(
@@ -67,16 +71,53 @@ def create_retriever(texts):
     )
     vectordb.persist()
 
-    return vectordb.as_retriever(search_kwargs={"k": 5})
+    return vectordb.as_retriever(search_kwargs={"k": k})
 
-def get_qa_chain(retriever):
-    llm = ChatOpenAI(temperature=0)
+@st.cache_resource(show_spinner=False)
+def get_llm():
+    # OpenAI chat (requires API key + billing)
+    return ChatOpenAI(temperature=0)
 
-    return ConversationalRetrievalChain.from_llm(
-        llm=llm,
-        retriever=retriever,
-        return_source_documents=False
-    )
+def build_prompt(question: str, context_chunks: List[str], chat_history: List[Tuple[str, str]]) -> str:
+    # Keep history short to reduce tokens
+    history_text = ""
+    for q, a in chat_history[-6:]:
+        history_text += f"User: {q}\nAssistant: {a}\n"
+
+    context_text = "\n\n---\n\n".join(context_chunks) if context_chunks else ""
+
+    prompt = f"""You are a helpful assistant answering ONLY from the provided context.
+If the answer is not in the context, say: "I don't know based on the uploaded documents."
+
+CHAT HISTORY:
+{history_text}
+
+CONTEXT:
+{context_text}
+
+QUESTION:
+{question}
+
+Answer in a clear, concise way.
+"""
+    return prompt
+
+def answer_question(retriever, question: str, chat_history: List[Tuple[str, str]], k: int):
+    docs = retriever.get_relevant_documents(question)
+    chunks = [d.page_content for d in docs][:k]
+
+    # Guardrail: no context found
+    if not chunks:
+        return "I don't know based on the uploaded documents.", []
+
+    llm = get_llm()
+    prompt = build_prompt(question, chunks, chat_history)
+
+    # ChatOpenAI returns an AIMessage-like object
+    resp = llm.invoke(prompt)
+    answer = getattr(resp, "content", str(resp))
+
+    return answer, chunks
 
 # -------------------- FILE UPLOAD --------------------
 uploaded_files = st.file_uploader(
@@ -84,6 +125,9 @@ uploaded_files = st.file_uploader(
     type="pdf",
     accept_multiple_files=True
 )
+
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
 
 if st.button("📥 Process Documents"):
     if "OPENAI_API_KEY" not in os.environ or not os.environ["OPENAI_API_KEY"].strip():
@@ -108,27 +152,30 @@ if st.button("📥 Process Documents"):
                 os.remove(pdf_path)
 
             texts = split_documents(all_docs)
-            st.session_state.retriever = create_retriever(texts)
-            st.session_state.qa_chain = get_qa_chain(st.session_state.retriever)
+            st.session_state.retriever = create_retriever(texts, k=top_k)
 
         st.success("✅ Documents processed successfully!")
 
 # -------------------- CHAT --------------------
-if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []
-
-if "qa_chain" in st.session_state:
+if "retriever" in st.session_state:
     query = st.chat_input("Ask a question about your documents")
     if query:
         st.chat_message("human").write(query)
 
-        result = st.session_state.qa_chain({
-            "question": query,
-            "chat_history": st.session_state.chat_history
-        })
+        answer, chunks = answer_question(
+            st.session_state.retriever,
+            query,
+            st.session_state.chat_history,
+            k=top_k
+        )
 
-        answer = result["answer"]
         st.chat_message("ai").write(answer)
+
+        if show_sources and chunks:
+            with st.expander("Retrieved chunks"):
+                for i, c in enumerate(chunks, 1):
+                    st.markdown(f"**Chunk {i}:**")
+                    st.write(c)
 
         st.session_state.chat_history.append((query, answer))
 else:
