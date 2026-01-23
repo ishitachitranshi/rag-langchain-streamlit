@@ -1,4 +1,5 @@
 import os
+import shutil
 import tempfile
 from pathlib import Path
 from typing import List, Tuple
@@ -47,6 +48,15 @@ with st.sidebar:
     show_sources = st.toggle("Show retrieved chunks", value=False)
     top_k = st.slider("Top-K chunks", min_value=2, max_value=10, value=5, step=1)
 
+    st.markdown("---")
+    if st.button("🧹 Reset Vector Store"):
+        if VECTOR_STORE_DIR.exists():
+            shutil.rmtree(VECTOR_STORE_DIR)
+        VECTOR_STORE_DIR.mkdir(parents=True, exist_ok=True)
+        st.session_state.pop("retriever", None)
+        st.session_state.pop("chat_history", None)
+        st.success("✅ Vector store reset. Re-upload & process documents.")
+
 # -------------------- HELPERS --------------------
 def load_pdf(file_path: str):
     loader = PyPDFLoader(file_path)
@@ -58,35 +68,34 @@ def split_documents(documents):
 
 @st.cache_resource(show_spinner=False)
 def get_local_embeddings():
-    # Free local embeddings (no HuggingFace API key)
+    # Free local embeddings
     return SentenceTransformerEmbeddings(model_name="all-MiniLM-L6-v2")
+
+@st.cache_resource(show_spinner=False)
+def get_llm():
+    return ChatOpenAI(temperature=0)
 
 def create_retriever(texts, k: int):
     embeddings = get_local_embeddings()
 
+    # Always rebuild Chroma from scratch (avoids dimension mismatch)
+    # If you want persistence, you can keep persist_directory but must reset when model changes.
     vectordb = Chroma.from_documents(
         texts,
         embedding=embeddings,
-        persist_directory=VECTOR_STORE_DIR.as_posix()
+        persist_directory=VECTOR_STORE_DIR.as_posix(),
     )
     vectordb.persist()
-
     return vectordb.as_retriever(search_kwargs={"k": k})
 
-@st.cache_resource(show_spinner=False)
-def get_llm():
-    # OpenAI chat (requires API key + billing)
-    return ChatOpenAI(temperature=0)
-
 def build_prompt(question: str, context_chunks: List[str], chat_history: List[Tuple[str, str]]) -> str:
-    # Keep history short to reduce tokens
     history_text = ""
     for q, a in chat_history[-6:]:
         history_text += f"User: {q}\nAssistant: {a}\n"
 
     context_text = "\n\n---\n\n".join(context_chunks) if context_chunks else ""
 
-    prompt = f"""You are a helpful assistant answering ONLY from the provided context.
+    return f"""You are a helpful assistant answering ONLY from the provided context.
 If the answer is not in the context, say: "I don't know based on the uploaded documents."
 
 CHAT HISTORY:
@@ -98,26 +107,26 @@ CONTEXT:
 QUESTION:
 {question}
 
-Answer in a clear, concise way.
+Answer clearly and concisely.
 """
-    return prompt
 
 def answer_question(retriever, question: str, chat_history: List[Tuple[str, str]], k: int):
     docs = retriever.get_relevant_documents(question)
     chunks = [d.page_content for d in docs][:k]
 
-    # Guardrail: no context found
     if not chunks:
         return "I don't know based on the uploaded documents.", []
 
     llm = get_llm()
     prompt = build_prompt(question, chunks, chat_history)
 
-    # ChatOpenAI returns an AIMessage-like object
     resp = llm.invoke(prompt)
     answer = getattr(resp, "content", str(resp))
-
     return answer, chunks
+
+# -------------------- STATE --------------------
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
 
 # -------------------- FILE UPLOAD --------------------
 uploaded_files = st.file_uploader(
@@ -126,9 +135,6 @@ uploaded_files = st.file_uploader(
     accept_multiple_files=True
 )
 
-if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []
-
 if st.button("📥 Process Documents"):
     if "OPENAI_API_KEY" not in os.environ or not os.environ["OPENAI_API_KEY"].strip():
         st.warning("OpenAI API key missing. Add it in Streamlit Secrets or enter it in the sidebar.")
@@ -136,14 +142,9 @@ if st.button("📥 Process Documents"):
         st.warning("Please upload at least one PDF.")
     else:
         all_docs = []
-
         with st.spinner("Processing documents..."):
             for file in uploaded_files:
-                with tempfile.NamedTemporaryFile(
-                    delete=False,
-                    suffix=".pdf",
-                    dir=TMP_DIR.as_posix()
-                ) as tmp:
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf", dir=TMP_DIR.as_posix()) as tmp:
                     tmp.write(file.read())
                     pdf_path = tmp.name
 
@@ -152,6 +153,14 @@ if st.button("📥 Process Documents"):
                 os.remove(pdf_path)
 
             texts = split_documents(all_docs)
+
+            # Important: if a previous store exists with different dimension, reset it
+            # This prevents the 384 vs 1536 crash.
+            if VECTOR_STORE_DIR.exists() and any(VECTOR_STORE_DIR.iterdir()):
+                # safest: wipe and rebuild for demo apps
+                shutil.rmtree(VECTOR_STORE_DIR)
+                VECTOR_STORE_DIR.mkdir(parents=True, exist_ok=True)
+
             st.session_state.retriever = create_retriever(texts, k=top_k)
 
         st.success("✅ Documents processed successfully!")
