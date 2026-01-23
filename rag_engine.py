@@ -1,138 +1,135 @@
-import os, tempfile
-import pinecone
+import os
+import tempfile
 from pathlib import Path
-
-from langchain.chains import RetrievalQA, ConversationalRetrievalChain
-from langchain.embeddings import OpenAIEmbeddings
-from langchain.vectorstores import Chroma
-from langchain import OpenAI
-from langchain.llms.openai import OpenAIChat
-from langchain.document_loaders import DirectoryLoader
-from langchain.text_splitter import CharacterTextSplitter
-from langchain.vectorstores import Chroma, Pinecone
-from langchain.embeddings.openai import OpenAIEmbeddings
-from langchain.memory import ConversationBufferMemory
-from langchain.memory.chat_message_histories import StreamlitChatMessageHistory
 
 import streamlit as st
 
+from langchain.chains import ConversationalRetrievalChain
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_community.vectorstores import Chroma
+from langchain_community.document_loaders import PyPDFLoader
+from langchain.text_splitter import CharacterTextSplitter
 
-TMP_DIR = Path(__file__).resolve().parent.joinpath('data', 'tmp')
-LOCAL_VECTOR_STORE_DIR = Path(__file__).resolve().parent.joinpath('data', 'vector_store')
+# -------------------- PATHS --------------------
+BASE_DIR = Path(__file__).resolve().parent
+TMP_DIR = BASE_DIR / "data" / "tmp"
+VECTOR_STORE_DIR = BASE_DIR / "data" / "vector_store"
 
-st.set_page_config(page_title="RAG")
-st.title("Retrieval Augmented Generation Engine")
+TMP_DIR.mkdir(parents=True, exist_ok=True)
+VECTOR_STORE_DIR.mkdir(parents=True, exist_ok=True)
 
+# -------------------- STREAMLIT CONFIG --------------------
+st.set_page_config(page_title="RAG Engine", layout="wide")
+st.title("📄 Retrieval Augmented Generation (RAG) Engine")
 
-def load_documents():
-    loader = DirectoryLoader(TMP_DIR.as_posix(), glob='**/*.pdf')
-    documents = loader.load()
-    return documents
+# -------------------- SIDEBAR --------------------
+with st.sidebar:
+    st.header("🔐 API Configuration")
+
+    if "openai_api_key" in st.secrets:
+        st.session_state.openai_api_key = st.secrets.openai_api_key
+    else:
+        st.session_state.openai_api_key = st.text_input(
+            "OpenAI API Key", type="password"
+        )
+
+    st.markdown("---")
+    st.markdown("📌 Upload PDFs and ask questions using RAG")
+
+# -------------------- HELPERS --------------------
+def load_pdf(file_path: str):
+    loader = PyPDFLoader(file_path)
+    return loader.load()
 
 def split_documents(documents):
-    text_splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=0)
-    texts = text_splitter.split_documents(documents)
-    return texts
-
-def embeddings_on_local_vectordb(texts):
-    vectordb = Chroma.from_documents(texts, embedding=OpenAIEmbeddings(),
-                                     persist_directory=LOCAL_VECTOR_STORE_DIR.as_posix())
-    vectordb.persist()
-    retriever = vectordb.as_retriever(search_kwargs={'k': 7})
-    return retriever
-
-def embeddings_on_pinecone(texts):
-    pinecone.init(api_key=st.session_state.pinecone_api_key, environment=st.session_state.pinecone_env)
-    embeddings = OpenAIEmbeddings(openai_api_key=st.session_state.openai_api_key)
-    vectordb = Pinecone.from_documents(texts, embeddings, index_name=st.session_state.pinecone_index)
-    retriever = vectordb.as_retriever()
-    return retriever
-
-def query_llm(retriever, query):
-    qa_chain = ConversationalRetrievalChain.from_llm(
-        llm=OpenAIChat(openai_api_key=st.session_state.openai_api_key),
-        retriever=retriever,
-        return_source_documents=True,
+    splitter = CharacterTextSplitter(
+        chunk_size=1000,
+        chunk_overlap=100
     )
-    result = qa_chain({'question': query, 'chat_history': st.session_state.messages})
-    result = result['answer']
-    st.session_state.messages.append((query, result))
-    return result
+    return splitter.split_documents(documents)
 
-def input_fields():
-    #
-    with st.sidebar:
-        #
-        if "openai_api_key" in st.secrets:
-            st.session_state.openai_api_key = st.secrets.openai_api_key
-        else:
-            st.session_state.openai_api_key = st.text_input("OpenAI API key", type="password")
-        #
-        if "pinecone_api_key" in st.secrets:
-            st.session_state.pinecone_api_key = st.secrets.pinecone_api_key
-        else: 
-            st.session_state.pinecone_api_key = st.text_input("Pinecone API key", type="password")
-        #
-        if "pinecone_env" in st.secrets:
-            st.session_state.pinecone_env = st.secrets.pinecone_env
-        else:
-            st.session_state.pinecone_env = st.text_input("Pinecone environment")
-        #
-        if "pinecone_index" in st.secrets:
-            st.session_state.pinecone_index = st.secrets.pinecone_index
-        else:
-            st.session_state.pinecone_index = st.text_input("Pinecone index name")
-    #
-    st.session_state.pinecone_db = st.toggle('Use Pinecone Vector DB')
-    #
-    st.session_state.source_docs = st.file_uploader(label="Upload Documents", type="pdf", accept_multiple_files=True)
-    #
+def create_retriever(texts):
+    embeddings = OpenAIEmbeddings(
+        openai_api_key=st.session_state.openai_api_key
+    )
 
+    vectordb = Chroma.from_documents(
+        texts,
+        embedding=embeddings,
+        persist_directory=VECTOR_STORE_DIR.as_posix()
+    )
+    vectordb.persist()
 
-def process_documents():
-    if not st.session_state.openai_api_key or not st.session_state.pinecone_api_key or not st.session_state.pinecone_env or not st.session_state.pinecone_index or not st.session_state.source_docs:
-        st.warning(f"Please upload the documents and provide the missing fields.")
+    return vectordb.as_retriever(search_kwargs={"k": 5})
+
+def get_qa_chain(retriever):
+    llm = ChatOpenAI(
+        openai_api_key=st.session_state.openai_api_key,
+        temperature=0
+    )
+
+    return ConversationalRetrievalChain.from_llm(
+        llm=llm,
+        retriever=retriever,
+        return_source_documents=False
+    )
+
+# -------------------- FILE UPLOAD --------------------
+uploaded_files = st.file_uploader(
+    "📤 Upload PDF documents",
+    type="pdf",
+    accept_multiple_files=True
+)
+
+if st.button("📥 Process Documents"):
+    if not st.session_state.openai_api_key:
+        st.warning("Please provide your OpenAI API key.")
+    elif not uploaded_files:
+        st.warning("Please upload at least one PDF.")
     else:
-        try:
-            for source_doc in st.session_state.source_docs:
-                #
-                with tempfile.NamedTemporaryFile(delete=False, dir=TMP_DIR.as_posix(), suffix='.pdf') as tmp_file:
-                    tmp_file.write(source_doc.read())
-                #
-                documents = load_documents()
-                #
-                for _file in TMP_DIR.iterdir():
-                    temp_file = TMP_DIR.joinpath(_file)
-                    temp_file.unlink()
-                #
-                texts = split_documents(documents)
-                #
-                if not st.session_state.pinecone_db:
-                    st.session_state.retriever = embeddings_on_local_vectordb(texts)
-                else:
-                    st.session_state.retriever = embeddings_on_pinecone(texts)
-        except Exception as e:
-            st.error(f"An error occurred: {e}")
+        all_docs = []
 
-def boot():
-    #
-    input_fields()
-    #
-    st.button("Submit Documents", on_click=process_documents)
-    #
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
-    #
-    for message in st.session_state.messages:
-        st.chat_message('human').write(message[0])
-        st.chat_message('ai').write(message[1])    
-    #
-    if query := st.chat_input():
+        with st.spinner("Processing documents..."):
+            for file in uploaded_files:
+                with tempfile.NamedTemporaryFile(
+                    delete=False,
+                    suffix=".pdf",
+                    dir=TMP_DIR.as_posix()
+                ) as tmp:
+                    tmp.write(file.read())
+                    pdf_path = tmp.name
+
+                docs = load_pdf(pdf_path)
+                all_docs.extend(docs)
+
+                os.remove(pdf_path)
+
+            texts = split_documents(all_docs)
+            st.session_state.retriever = create_retriever(texts)
+            st.session_state.qa_chain = get_qa_chain(
+                st.session_state.retriever
+            )
+
+        st.success("✅ Documents processed successfully!")
+
+# -------------------- CHAT --------------------
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
+
+if "qa_chain" in st.session_state:
+    query = st.chat_input("Ask a question about your documents")
+
+    if query:
         st.chat_message("human").write(query)
-        response = query_llm(st.session_state.retriever, query)
-        st.chat_message("ai").write(response)
 
-if __name__ == '__main__':
-    #
-    boot()
-    
+        result = st.session_state.qa_chain({
+            "question": query,
+            "chat_history": st.session_state.chat_history
+        })
+
+        answer = result["answer"]
+
+        st.chat_message("ai").write(answer)
+        st.session_state.chat_history.append((query, answer))
+else:
+    st.info("⬆️ Upload and process documents to start chatting.")
