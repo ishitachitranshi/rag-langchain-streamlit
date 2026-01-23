@@ -36,6 +36,9 @@ with st.sidebar:
         key = st.text_input("OpenAI API Key", type="password")
         if key:
             os.environ["OPENAI_API_KEY"] = key
+            st.success("✅ OpenAI API key set for this session")
+        else:
+            st.warning("⚠️ Add OPENAI_API_KEY in Streamlit Secrets or paste it here")
 
     st.markdown("---")
     st.markdown("📌 Upload PDFs and ask questions using RAG")
@@ -46,10 +49,7 @@ def load_pdf(file_path: str):
     return loader.load()
 
 def split_documents(documents):
-    splitter = CharacterTextSplitter(
-        chunk_size=1000,
-        chunk_overlap=100
-    )
+    splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
     return splitter.split_documents(documents)
 
 @st.cache_resource(show_spinner=False)
@@ -109,9 +109,7 @@ if st.button("📥 Process Documents"):
 
             texts = split_documents(all_docs)
             st.session_state.retriever = create_retriever(texts)
-            st.session_state.qa_chain = get_qa_chain(
-                st.session_state.retriever
-            )
+            st.session_state.qa_chain = get_qa_chain(st.session_state.retriever)
 
         st.success("✅ Documents processed successfully!")
 
@@ -120,4 +118,18 @@ if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 
 if "qa_chain" in st.session_state:
-    query = st.chat_input("Ask a question about your documents")_
+    query = st.chat_input("Ask a question about your documents")  # ✅ no trailing _
+    if query:
+        st.chat_message("human").write(query)
+
+        result = st.session_state.qa_chain({
+            "question": query,
+            "chat_history": st.session_state.chat_history
+        })
+
+        answer = result["answer"]
+        st.chat_message("ai").write(answer)
+
+        st.session_state.chat_history.append((query, answer))
+else:
+    st.info("⬆️ Upload and process documents to start chatting.")
