@@ -6,4 +6,3 @@ sentence-transformers==2.6.1
 pypdf==6.6.0
 openai==1.109.1
 tiktoken==0.12.0
-
