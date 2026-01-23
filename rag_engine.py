@@ -1,5 +1,4 @@
 import os
-import shutil
 import tempfile
 from pathlib import Path
 from typing import List, Tuple
@@ -16,10 +15,7 @@ from langchain_community.embeddings import SentenceTransformerEmbeddings
 # -------------------- PATHS --------------------
 BASE_DIR = Path(__file__).resolve().parent
 TMP_DIR = BASE_DIR / "data" / "tmp"
-VECTOR_STORE_DIR = BASE_DIR / "data" / "vector_store"
-
 TMP_DIR.mkdir(parents=True, exist_ok=True)
-VECTOR_STORE_DIR.mkdir(parents=True, exist_ok=True)
 
 # -------------------- STREAMLIT CONFIG --------------------
 st.set_page_config(page_title="RAG Engine", layout="wide")
@@ -29,7 +25,6 @@ st.title("📄 Retrieval Augmented Generation (RAG) Engine")
 with st.sidebar:
     st.header("🔐 API Configuration")
 
-    # Use Streamlit Secrets first, fallback to manual input
     if "OPENAI_API_KEY" in st.secrets:
         os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI_API_KEY"]
         st.success("✅ OpenAI API key loaded from Streamlit Secrets")
@@ -42,29 +37,21 @@ with st.sidebar:
             st.warning("⚠️ Add OPENAI_API_KEY in Streamlit Secrets or paste it here")
 
     st.markdown("---")
-    st.markdown("📌 Upload PDFs and ask questions using RAG")
-
-    st.markdown("---")
     show_sources = st.toggle("Show retrieved chunks", value=False)
     top_k = st.slider("Top-K chunks", min_value=2, max_value=10, value=5, step=1)
 
     st.markdown("---")
-    if st.button("🧹 Reset Vector Store"):
-        if VECTOR_STORE_DIR.exists():
-            shutil.rmtree(VECTOR_STORE_DIR)
-        VECTOR_STORE_DIR.mkdir(parents=True, exist_ok=True)
+    if st.button("🧹 Reset Session Index"):
         st.session_state.pop("retriever", None)
         st.session_state.pop("chat_history", None)
-        st.success("✅ Vector store reset. Re-upload & process documents.")
+        st.success("✅ Cleared in-memory index. Re-upload & process documents.")
 
 # -------------------- HELPERS --------------------
 def load_pdf(file_path: str):
-    loader = PyPDFLoader(file_path)
-    return loader.load()
+    return PyPDFLoader(file_path).load()
 
 def split_documents(documents):
-    splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
-    return splitter.split_documents(documents)
+    return CharacterTextSplitter(chunk_size=1000, chunk_overlap=100).split_documents(documents)
 
 @st.cache_resource(show_spinner=False)
 def get_local_embeddings():
@@ -74,19 +61,6 @@ def get_local_embeddings():
 @st.cache_resource(show_spinner=False)
 def get_llm():
     return ChatOpenAI(temperature=0)
-
-def create_retriever(texts, k: int):
-    embeddings = get_local_embeddings()
-
-    # Always rebuild Chroma from scratch (avoids dimension mismatch)
-    # If you want persistence, you can keep persist_directory but must reset when model changes.
-    vectordb = Chroma.from_documents(
-        texts,
-        embedding=embeddings,
-        persist_directory=VECTOR_STORE_DIR.as_posix(),
-    )
-    vectordb.persist()
-    return vectordb.as_retriever(search_kwargs={"k": k})
 
 def build_prompt(question: str, context_chunks: List[str], chat_history: List[Tuple[str, str]]) -> str:
     history_text = ""
@@ -148,20 +122,16 @@ if st.button("📥 Process Documents"):
                     tmp.write(file.read())
                     pdf_path = tmp.name
 
-                docs = load_pdf(pdf_path)
-                all_docs.extend(docs)
+                all_docs.extend(load_pdf(pdf_path))
                 os.remove(pdf_path)
 
             texts = split_documents(all_docs)
 
-            # Important: if a previous store exists with different dimension, reset it
-            # This prevents the 384 vs 1536 crash.
-            if VECTOR_STORE_DIR.exists() and any(VECTOR_STORE_DIR.iterdir()):
-                # safest: wipe and rebuild for demo apps
-                shutil.rmtree(VECTOR_STORE_DIR)
-                VECTOR_STORE_DIR.mkdir(parents=True, exist_ok=True)
+            embeddings = get_local_embeddings()
 
-            st.session_state.retriever = create_retriever(texts, k=top_k)
+            # ✅ IN-MEMORY Chroma (NO persist_directory) -> avoids tenant/db errors
+            vectordb = Chroma.from_documents(texts, embedding=embeddings)
+            st.session_state.retriever = vectordb.as_retriever(search_kwargs={"k": top_k})
 
         st.success("✅ Documents processed successfully!")
 
