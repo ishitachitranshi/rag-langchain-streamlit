@@ -3,7 +3,6 @@ import tempfile
 from pathlib import Path
 
 import streamlit as st
-
 from langchain.chains import ConversationalRetrievalChain
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.vectorstores import Chroma
@@ -26,12 +25,11 @@ st.title("📄 Retrieval Augmented Generation (RAG) Engine")
 with st.sidebar:
     st.header("🔐 API Configuration")
 
-    if "openai_api_key" in st.secrets:
-        st.session_state.openai_api_key = st.secrets.openai_api_key
+    if "OPENAI_API_KEY" in st.secrets:
+        os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI_API_KEY"]
+        st.success("✅ OpenAI API key loaded from Streamlit Secrets")
     else:
-        st.session_state.openai_api_key = st.text_input(
-            "OpenAI API Key", type="password"
-        )
+        st.error("❌ OPENAI_API_KEY not found in Streamlit Secrets")
 
     st.markdown("---")
     st.markdown("📌 Upload PDFs and ask questions using RAG")
@@ -49,9 +47,7 @@ def split_documents(documents):
     return splitter.split_documents(documents)
 
 def create_retriever(texts):
-    embeddings = OpenAIEmbeddings(
-        openai_api_key=st.session_state.openai_api_key
-    )
+    embeddings = OpenAIEmbeddings()
 
     vectordb = Chroma.from_documents(
         texts,
@@ -63,10 +59,7 @@ def create_retriever(texts):
     return vectordb.as_retriever(search_kwargs={"k": 5})
 
 def get_qa_chain(retriever):
-    llm = ChatOpenAI(
-        openai_api_key=st.session_state.openai_api_key,
-        temperature=0
-    )
+    llm = ChatOpenAI(temperature=0)
 
     return ConversationalRetrievalChain.from_llm(
         llm=llm,
@@ -82,8 +75,8 @@ uploaded_files = st.file_uploader(
 )
 
 if st.button("📥 Process Documents"):
-    if not st.session_state.openai_api_key:
-        st.warning("Please provide your OpenAI API key.")
+    if "OPENAI_API_KEY" not in os.environ:
+        st.warning("OpenAI API key missing. Add it in Streamlit Secrets.")
     elif not uploaded_files:
         st.warning("Please upload at least one PDF.")
     else:
@@ -101,7 +94,6 @@ if st.button("📥 Process Documents"):
 
                 docs = load_pdf(pdf_path)
                 all_docs.extend(docs)
-
                 os.remove(pdf_path)
 
             texts = split_documents(all_docs)
