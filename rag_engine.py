@@ -3,11 +3,14 @@ import tempfile
 from pathlib import Path
 
 import streamlit as st
+
 from langchain.chains import ConversationalRetrievalChain
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_openai import ChatOpenAI
 from langchain_community.vectorstores import Chroma
 from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import CharacterTextSplitter
+from langchain_community.embeddings import SentenceTransformerEmbeddings
+
 
 # -------------------- PATHS --------------------
 BASE_DIR = Path(__file__).resolve().parent
@@ -25,11 +28,14 @@ st.title("📄 Retrieval Augmented Generation (RAG) Engine")
 with st.sidebar:
     st.header("🔐 API Configuration")
 
+    # Use Streamlit Secrets first, fallback to manual input
     if "OPENAI_API_KEY" in st.secrets:
         os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI_API_KEY"]
         st.success("✅ OpenAI API key loaded from Streamlit Secrets")
     else:
-        st.error("❌ OPENAI_API_KEY not found in Streamlit Secrets")
+        key = st.text_input("OpenAI API Key", type="password")
+        if key:
+            os.environ["OPENAI_API_KEY"] = key
 
     st.markdown("---")
     st.markdown("📌 Upload PDFs and ask questions using RAG")
@@ -46,8 +52,13 @@ def split_documents(documents):
     )
     return splitter.split_documents(documents)
 
+@st.cache_resource(show_spinner=False)
+def get_local_embeddings():
+    # Local, free embeddings (no HuggingFace API key required)
+    return SentenceTransformerEmbeddings(model_name="all-MiniLM-L6-v2")
+
 def create_retriever(texts):
-    embeddings = OpenAIEmbeddings()
+    embeddings = get_local_embeddings()
 
     vectordb = Chroma.from_documents(
         texts,
@@ -75,8 +86,8 @@ uploaded_files = st.file_uploader(
 )
 
 if st.button("📥 Process Documents"):
-    if "OPENAI_API_KEY" not in os.environ:
-        st.warning("OpenAI API key missing. Add it in Streamlit Secrets.")
+    if "OPENAI_API_KEY" not in os.environ or not os.environ["OPENAI_API_KEY"].strip():
+        st.warning("OpenAI API key missing. Add it in Streamlit Secrets or enter it in the sidebar.")
     elif not uploaded_files:
         st.warning("Please upload at least one PDF.")
     else:
@@ -109,19 +120,4 @@ if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 
 if "qa_chain" in st.session_state:
-    query = st.chat_input("Ask a question about your documents")
-
-    if query:
-        st.chat_message("human").write(query)
-
-        result = st.session_state.qa_chain({
-            "question": query,
-            "chat_history": st.session_state.chat_history
-        })
-
-        answer = result["answer"]
-
-        st.chat_message("ai").write(answer)
-        st.session_state.chat_history.append((query, answer))
-else:
-    st.info("⬆️ Upload and process documents to start chatting.")
+    query = st.chat_input("Ask a question about your documents")_
