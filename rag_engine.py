@@ -20,21 +20,27 @@ TMP_DIR.mkdir(parents=True, exist_ok=True)
 st.set_page_config(page_title="RAG Engine", layout="wide")
 st.title("📄 Retrieval Augmented Generation (RAG) Engine")
 
-# -------------------- SIDEBAR (PRODUCTION STYLE) --------------------
+# -------------------- SIDEBAR --------------------
 with st.sidebar:
-    st.header("🔐 API Configuration")
+    st.header("🔐 OpenAI API Key")
 
-    # Recruiter-ready pattern: user provides key
-    if "OPENAI_API_KEY" in st.secrets:
-        os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI_API_KEY"]
-        st.success("✅ OpenAI API key loaded from secrets")
+    st.markdown(
+        "This app uses **your OpenAI API key** for answering questions.\n\n"
+        "🔹 Your key is **not stored**\n"
+        "🔹 It is used only for this session\n"
+    )
+
+    user_key = st.text_input(
+        "Enter your OpenAI API key",
+        type="password",
+        placeholder="sk-..."
+    )
+
+    if user_key:
+        os.environ["OPENAI_API_KEY"] = user_key
+        st.success("✅ API key loaded for this session")
     else:
-        key = st.text_input("OpenAI API Key", type="password")
-        if key:
-            os.environ["OPENAI_API_KEY"] = key
-            st.success("✅ API key set for this session")
-        else:
-            st.info("ℹ️ Paste your OpenAI API key to enable answers")
+        st.warning("⚠️ Please enter your OpenAI API key to enable answers")
 
     st.markdown("---")
     show_sources = st.toggle("Show retrieved chunks", value=False)
@@ -42,7 +48,7 @@ with st.sidebar:
 
     if st.button("🧹 Reset session"):
         st.session_state.clear()
-        st.success("Session cleared")
+        st.success("Session reset")
 
 # -------------------- HELPERS --------------------
 def load_pdf(path: str):
@@ -54,12 +60,10 @@ def split_documents(docs):
 
 @st.cache_resource(show_spinner=False)
 def get_embeddings():
-    # FREE, local embeddings (cost-efficient)
+    # Free, local embeddings (cost-efficient)
     return SentenceTransformerEmbeddings(model_name="all-MiniLM-L6-v2")
 
-@st.cache_resource(show_spinner=False)
 def get_llm():
-    # Production LLM (user-provided key)
     return ChatOpenAI(temperature=0)
 
 def build_prompt(question: str, chunks: List[str], history: List[Tuple[str, str]]) -> str:
@@ -94,21 +98,22 @@ def answer_question(retriever, question, history, k):
     if not chunks:
         return "I don't know based on the uploaded documents.", []
 
+    if "OPENAI_API_KEY" not in os.environ:
+        return "⚠️ Please enter your OpenAI API key in the sidebar.", chunks
+
     prompt = build_prompt(question, chunks, history)
 
     try:
         llm = get_llm()
         resp = llm.invoke(prompt)
-        answer = getattr(resp, "content", str(resp))
-        return answer, chunks
+        return getattr(resp, "content", str(resp)), chunks
 
     except Exception as e:
         msg = str(e)
         if "insufficient_quota" in msg or "429" in msg:
             return (
-                "❌ OpenAI quota not available for this API key.\n\n"
-                "✅ Use an OpenAI key with billing enabled.\n"
-                "This app is designed so users bring their own key.",
+                "❌ Your OpenAI API key has no active quota.\n\n"
+                "✅ Enable billing or use another key.",
                 chunks,
             )
         return f"❌ LLM error: {e}", chunks
@@ -125,8 +130,8 @@ uploaded_files = st.file_uploader(
 )
 
 if st.button("📥 Process Documents"):
-    if "OPENAI_API_KEY" not in os.environ:
-        st.warning("Please provide an OpenAI API key.")
+    if not user_key:
+        st.warning("Please enter your OpenAI API key first.")
     elif not uploaded_files:
         st.warning("Please upload at least one PDF.")
     else:
@@ -144,7 +149,6 @@ if st.button("📥 Process Documents"):
             texts = split_documents(all_docs)
             embeddings = get_embeddings()
 
-            # In-memory Chroma → NO deployment DB issues
             vectordb = Chroma.from_documents(texts, embedding=embeddings)
             st.session_state.retriever = vectordb.as_retriever(
                 search_kwargs={"k": top_k}
