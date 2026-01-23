@@ -118,7 +118,7 @@ if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 
 if "qa_chain" in st.session_state:
-    query = st.chat_input("Ask a question about your documents")  # ✅ no trailing _
+    query = st.chat_input("Ask a question about your documents")
     if query:
         st.chat_message("human").write(query)
 
