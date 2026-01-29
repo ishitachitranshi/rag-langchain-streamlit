@@ -54,8 +54,6 @@ Before running the project, ensure you have:
 
 ---
 
-👩‍💻 Contributors  
-Ishita Chitranshi
 
 📬 Contact  
 If you have any questions, ideas, or would like to collaborate, feel free to reach out:
